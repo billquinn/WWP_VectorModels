@@ -1,0 +1,214 @@
+---
+title: "bulkTransform_w2v"
+output: html_document
+---
+
+A few people provided design and programming input for this document, including Sarah Connell, Jonathan Fitzgerald, Thanasis Kinias, Bill Quinn, and Parth Tandel. The last section, as mentioned below, is taken from Ben Schmidt's blog.
+
+This document was created to create various word2vec models of the WWP corpus after parsing the .xml files and creating .txt files. The "txt to bin bulk transform" takes a directory of .txt files and transforms them into a word2vec model. The "w2v checker" compares a set of word pairs and measures their similarities. This second code block works most effectively with a substantial understanding of the corpus in play. "compare model scores" creates a simple graph to visualize results. The last block, Ben Schmidt's word2vec "meaning chains," is an experimental code to explore word chains based on similarities between two words. You can find more about word chains here: https://sappingattention.blogspot.com/2018/06/meaning-chains-with-word-embeddings.html.
+
+
+```{r setup, include=FALSE}
+library(tidyverse)
+library(wordVectors)
+library(magrittr)
+library(lsa)
+```
+
+# txt to bin bulk transform
+
+```{r}
+textDirectory = "/Users/williamquinn/Desktop/DH/Python/WWP/WWP_WordVectors/Output/"
+
+
+for (file in list.files(textDirectory)) {
+  if (grepl(".txt", file)) {
+    
+    file_string = gsub(".txt","",file)
+    print (paste(textDirectory, file, sep = ""))
+    
+    # Prep the corpus
+    prep_word2vec(origin = paste(textDirectory, file, sep=""),
+                  destination = paste(textDirectory, file, "_cleaned", sep=""),
+                  lowercase=T,
+                  bundle_ngrams=1)
+    
+    train_word2vec(
+      paste(textDirectory, file, "_cleaned", sep=""),
+      output_file= paste(textDirectory, file_string, ".bin", sep = ""),
+      vectors=100,
+      threads=3,
+      window=6, iter=10, negative_samples=15
+      )
+    
+    }
+}
+```
+
+
+# w2v checker
+
+```{r}
+getwd()
+files_list  = list.files(pattern = "*.bin$", recursive = TRUE)
+
+rownames <- c()
+
+data_frame <- data.frame()
+data = list(c("away", "off"),
+            c("before", "after"),
+            c("best", "wisest"),
+            c("body", "substance"),
+            c("cause", "effects"),
+            c("children", "parents"),
+            c("christ", "jesus"),
+            c("come", "go"),
+            c("day", "night"),
+            c("dear", "friend"),
+            c("earth", "heaven"),
+            c("eye", "glance"),
+            c("fear", "dread"),
+            c("first", "second"),
+            c("find", "think"),
+            c("give", "leave"),
+            c("god", "almighty"),
+            c("good", "bad"),
+            c("head", "shoulders"),
+            c("heart", "soul"),
+            c("honour", "reputation"),
+            c("house", "neighbourhood"),
+            c("kind", "sort"),
+            c("king", "prince"),
+            c("leave", "quit"),
+            c("life", "death"),
+            c("light", "beams"),
+            c("little", "small"))
+
+
+data_list = list()
+
+for(fn in files_list) {
+  
+  wwp_model = read.vectors(fn)
+  sims <- c()
+  for(pairs in data)
+  {
+    vector1 <- c()
+    for(x in wwp_model[[pairs[1]]]) {
+      vector1 <- c(vector1, x)
+    }
+    
+    vector2 <- c()
+    for(x in wwp_model[[pairs[2]]]) {
+      vector2 <- c(vector2, x)
+    }
+    
+    sims <- c(sims, cosine(vector1,vector2))
+    f_name <- strsplit(fn, "/")[[1]][[2]]
+    data_list[[f_name]] <- sims
+  }
+  
+}
+
+for(pairs in data)
+{
+  rownames <- c(rownames, paste(pairs[1], pairs[2], sep = "-"))
+}
+zs
+results <- structure(data_list,
+                     class     = "data.frame",
+                     row.names = rownames
+)
+
+write.csv(file="results.csv", x=results)
+```
+
+# compare model scores from results (as is and averaged)
+```{r}
+checks = read.csv("results.csv", header= TRUE, sep=",")
+checks = checks %>% gather(word_pair, "score", 2:11)
+colnames(checks) = c("word_pair", "model", "score")
+
+ggplot(checks, aes(x=model, y=score, fill=model)) +
+  geom_bar(stat="identity") +
+  facet_wrap(~word_pair)
+
+checksAvg = aggregate(checks[, 3], list(checks$model), mean)
+# average is the wrong metric; distance between the measures 
+# top 1- words in each model and guage which words return near top
+
+ggplot(checksAvg, aes(x=Group.1, y=x, fill=Group.1)) +
+  geom_bar(stat="identity") +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))
+```
+
+
+# Ben's word2vec "meaning chains"
+```{r}
+w2vModel <- read.vectors("data/wwo_nonreg_non-us.bin")
+
+cpath = function(matrix, w1, w2, blacklist = c()) {
+  p1 = matrix[[w1]]
+  p2 = matrix[[w2]]
+  
+  base_similarity = cosineSimilarity(p1, p2)
+  pairsims = matrix %*% t(rbind(p1, p2))
+  
+  # Words closer to *either* candidate than the other word. These might be used eventually; mostly to save   on computation in later steps.
+  decentsims = pairsims[apply(pairsims, 1, max) >= base_similarity[1],]
+  
+  # Words closer to *both* candidates than the other word. The best of these is the intermediary.
+  greatsims = pairsims[apply(pairsims, 1, min) >= base_similarity[1],]
+  if (length(nrow(greatsims))==0 || nrow(greatsims) == 0) {
+    return(unique(c(w1, w2)))
+    }
+  pivot = order(-rowSums(greatsims))[1:4]
+  pivotwords = rownames(greatsims)[pivot]
+  pivotword = pivotwords[!pivotwords %in% c(w1,w2, blacklist)][1]
+  
+  # highlight pivots.
+  message(w1, "<-->", toupper(pivotword), "<--->", w2)
+  if(is.null(pivotword) || is.na(pivotword)) {
+    message(w1,w2)
+    return(unique(c(w1, w2)))
+    }
+  pivotpoint = matrix[[pivotword]]
+
+  # Really, this should *different* for the right and left side.
+  mat = matrix[rownames(matrix) %in% rownames(decentsims),]
+  
+  left = cpath(mat, w1, pivotword, blacklist = c(w1, w2, blacklist))
+  right = cpath(mat, pivotword, w2, blacklist = c(w1, w2, blacklist))
+  return(unique(c(left, right)))
+  }
+
+drawpath = function(model, w1, w2, save=F,nnoise = 1) { # i added model argument
+  pathed = cpath(model, w1, w2)
+  
+  just_this = model %>% extract_vectors(pathed)
+  
+  r = just_this %>% prcomp %>% `$`("rotation") %>% `[`(,c(1,2))
+  noisewords = sample(rownames(model), nnoise)
+  
+  with_noise = model %>% extract_vectors(c(pathed, noisewords))
+  
+  lotsa = with_noise %*% r %>% as.data.frame %>% rownames_to_column("word") %>% 
+    mutate(labelled = word %in% pathed) %>%
+    mutate(word = ordered(word, levels = c(pathed, noisewords) )) %>% arrange(word)
+  
+  g = lotsa %>%
+    ggplot() + aes(x=PC1,y = PC2, label = word) + 
+    geom_point(data = lotsa %>% 
+                 filter(!labelled), size = .5, alpha = .33) + 
+    geom_path(data = lotsa %>% filter(labelled), alpha = .33) + 
+    geom_text(data = lotsa %>% filter(labelled)) + 
+    labs(title=paste("From", w1, "to", w2))
+  
+  if (save)
+    {ggsave(g, width = 10, height = 8, filename = paste0("~/Pictures/", paste("From", w1, "to", w2), ".png"))}
+  
+  g
+  }
+
+drawpath(w2vModel, 'king', 'peasant', save = F)
+```
